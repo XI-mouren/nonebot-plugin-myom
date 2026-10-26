@@ -1,0 +1,16 @@
+# 统一换行符：仓库内与检出均为 LF（插件最终跑在 Linux 服务器上）
+* text=auto eol=lf
+
+# Windows 脚本保留 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件不做换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.whl binary
+*.zip binary

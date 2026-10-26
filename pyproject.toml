@@ -1,0 +1,60 @@
+[project]
+name = "nonebot-plugin-myom"
+version = "0.5.0"
+description = "群聊特化 LLM 聊天机器人：分层记忆、群友画像、表情包学习、联网搜索、生物节律能量与用量统计"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "XI-mouren" }]
+keywords = [
+    "nonebot",
+    "nonebot2",
+    "plugin",
+    "onebot",
+    "llm",
+    "chatbot",
+    "qq",
+    "group-chat",
+    "meme",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+]
+dependencies = [
+    "nonebot2>=2.2.0,<3.0.0",
+    "nonebot-adapter-onebot>=2.4.0,<3.0.0",
+    "nonebot-plugin-localstore>=0.7.0,<1.0.0",
+    "nonebot-plugin-apscheduler>=0.5.0,<1.0.0",
+    "httpx>=0.27.0,<1.0.0",
+    "openai>=1.40.0",
+    "pillow>=10.0.0",
+    "numpy>=1.24.0",
+    "anyio>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/XI-mouren/nonebot-plugin-myom"
+Repository = "https://github.com/XI-mouren/nonebot-plugin-myom"
+Issues = "https://github.com/XI-mouren/nonebot-plugin-myom/issues"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["nonebot_plugin_myom"]
+include-package-data = true
+
+[tool.nonebot]
+adapters = [
+    { name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" },
+]
+plugins = ["nonebot_plugin_myom"]
