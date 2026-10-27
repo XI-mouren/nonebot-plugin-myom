@@ -10,7 +10,7 @@
 
 > 基于 [Funny1Potato/nonebot-plugin-aigf](https://github.com/Funny1Potato/nonebot-plugin-aigf) 二次开发（上游：[shadow3aaa/nonebot-plugin-nyaturingtest](https://github.com/shadow3aaa/nonebot-plugin-nyaturingtest)），遵循 **AGPL-3.0** 协议开源。
 
-当前版本：**0.5.2**（包名 `nonebot-plugin-myom`，模块名 `nonebot_plugin_myom`）
+当前版本：**0.5.3**（包名 `nonebot-plugin-myom`，模块名 `nonebot_plugin_myom`）
 
 ---
 
