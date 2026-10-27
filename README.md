@@ -10,7 +10,7 @@
 
 > 基于 [Funny1Potato/nonebot-plugin-aigf](https://github.com/Funny1Potato/nonebot-plugin-aigf) 二次开发（上游：[shadow3aaa/nonebot-plugin-nyaturingtest](https://github.com/shadow3aaa/nonebot-plugin-nyaturingtest)），遵循 **AGPL-3.0** 协议开源。
 
-当前版本：**0.5.1**（包名 `nonebot-plugin-myom`，模块名 `nonebot_plugin_myom`）
+当前版本：**0.5.2**（包名 `nonebot-plugin-myom`，模块名 `nonebot_plugin_myom`）
 
 ---
 
@@ -225,7 +225,7 @@ AIGF_CHAT_OPENAI_API_KEY=sk-xxxxxxxx
 | `AIGF_VLM_MODEL`      | `""`   | VLM 模型名称                                                 |
 | `AIGF_VLM_BASE_URL`   | `""`   | VLM 接口地址                                                 |
 | `AIGF_VLM_API_KEY`    | `""`   | VLM 的 Key（留空则复用 LLM Key）                             |
-| `AIGF_VLM_MAX_TOKENS` | `150`  | VLM 单次输出上限（0=不限制）；看图描述通常 100 tokens 内足够 |
+| `AIGF_VLM_MAX_TOKENS` | `0`    | VLM 单次输出上限（`0` = 不限制，默认）。**推理型视觉模型（Qwen3-VL / GLM-4.5V 等）必须保持 `0`**，否则思考过程会吃光配额导致描述为空；普通视觉模型可设 `150` 降低看图消耗 |
 
 ### 群与行为
 

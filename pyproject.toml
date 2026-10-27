@@ -1,6 +1,6 @@
 [project]
 name = "nonebot-plugin-myom"
-version = "0.5.1"
+version = "0.5.2"
 description = "群聊特化 LLM 聊天机器人：分层记忆、群友画像、表情包学习、联网搜索、生物节律能量与用量统计"
 readme = "README.md"
 license = "AGPL-3.0-or-later"

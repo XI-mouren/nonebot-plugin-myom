@@ -32,7 +32,7 @@ class Config(BaseModel):
     aigf_vlm_model: str = Field("", validation_alias=AliasChoices("myom_vlm_model", "aigf_vlm_model"), description="VLM 模型名称")
     aigf_vlm_base_url: str = Field("", validation_alias=AliasChoices("myom_vlm_base_url", "aigf_vlm_base_url"), description="VLM API 地址")
     aigf_vlm_api_key: str = Field("", validation_alias=AliasChoices("myom_vlm_api_key", "aigf_vlm_api_key"), description="VLM API Key（为空时使用 chat_openai_api_key）")
-    aigf_vlm_max_tokens: int = Field(150, validation_alias=AliasChoices("myom_vlm_max_tokens", "aigf_vlm_max_tokens"), description="VLM 单次输出上限 tokens（0=不限制）；默认 150 可显著降低看图输出消耗")
+    aigf_vlm_max_tokens: int = Field(0, validation_alias=AliasChoices("myom_vlm_max_tokens", "aigf_vlm_max_tokens"), description="VLM 单次输出上限 tokens；默认 0 = 不限制（不传该参数）。带思考过程的推理型视觉模型必须保持 0，否则 token 会被 reasoning 吃光、描述返回空；普通视觉模型可设 150 降低看图消耗")
     aigf_enabled_groups: list[int] = Field(default_factory=list, validation_alias=AliasChoices("myom_enabled_groups", "aigf_enabled_groups"), description="启用的群号列表")
     aigf_timezone_offset: float = Field(8.0, validation_alias=AliasChoices("myom_timezone_offset", "aigf_timezone_offset"), description="时区偏移（小时），默认 UTC+8 北京时间；服务器在海外时无需改系统时区，直接配此项（支持半时区如 5.5）")
     aigf_meme_enabled: bool = Field(True, validation_alias=AliasChoices("myom_meme_enabled", "aigf_meme_enabled"), description="是否启用表情包功能")
