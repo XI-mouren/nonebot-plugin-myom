@@ -382,7 +382,8 @@ async def handle_auto_chat(bot: Bot, event: GroupMessageEvent):
     state = _ensure_group_state(group_id)
     user_id = event.get_user_id()
 
-    # 能量节律预判：休眠/疲倦期且未被 @ → 连图片识别都跳过（省 token，也符合"睡着了"）
+    # 能量节律预判：仅休眠期且未被 @ → 连图片识别都跳过（省 token，也符合"睡着了"）
+    # （疲倦期不拦截：正常走 LLM 决策，语气与能量按疲倦期参数结算）
     block_reason = state.session.energy_blocked(event.is_tome())
     if block_reason:
         state.session.settle_blocked()

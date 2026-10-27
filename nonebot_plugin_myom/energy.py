@@ -16,9 +16,10 @@
 """能量节律引擎（四态 + 能量档位）。
 
 两层职责严格分离：
-- **时间片状态**（兴奋/平淡/疲倦）只决定能量怎么变：回复消耗、未回复恢复、被 @ 提升；
+- **时间片状态**（兴奋/平淡/疲倦）只决定能量怎么变（回复消耗、未回复恢复、被 @ 提升）
+  和语气基调（写进 prompt），**不做任何硬拦截**；
 - **能量档位**（四档）决定怎么回复：语气、表情包概率与候选数量、回复倾向提示。
-- **睡眠是独立状态**，不属于任何档位：能量 <= sleep.threshold 即入睡，非 @ 消息不再进入档位判定。
+- **睡眠是独立状态**，也是唯一的硬拦截：能量 <= sleep.threshold 即入睡，非 @ 消息直接丢弃。
 
 休眠是第四态（硬拦截），优先级最高。
 设计稿：docs/能量机制重构方案.md
@@ -141,7 +142,6 @@ DEFAULTS: dict[str, Any] = {
         "wake_tone": "你刚才睡着了，被 @ 叫醒。先说明自己刚睡着、现在还很困，再回应对方的话；语气不要冲。",
     },
     "decision": {
-        "tired_block_non_at": True,
         "meme_max_per_reply": 1,
         "meme_prob_at_boost": 0.15,
         "reply_hint_k": 0.60,
@@ -387,6 +387,11 @@ def _merge_config(raw: dict[str, Any]) -> dict[str, Any]:
     cfg["levels"] = _merge_levels(raw.get("levels"))
     cfg["sleep"] = {**DEFAULTS["sleep"], **(raw.get("sleep") or {})}
     cfg["decision"] = {**DEFAULTS["decision"], **(raw.get("decision") or {})}
+    if "tired_block_non_at" in (raw.get("decision") or {}):
+        # 0.5.2 及以前的行为：疲倦期非 @ 硬拦截。0.5.3 起只有睡眠态拦截。
+        logger.warning(
+            "[energy] energy.json 里的 decision.tired_block_non_at 已废弃"
+            "（疲倦期不再硬拦截，该字段会被忽略），可从 energy.json 中删除")
     return cfg
 
 
@@ -653,15 +658,17 @@ def wake(cfg: dict[str, Any], st: EnergyState, *, when: datetime | None = None) 
 
 def should_block(cfg: dict[str, Any], st: EnergyState, state: str, *,
                  is_at: bool, when: datetime | None = None) -> str:
-    """是否需要硬拦截（不调 LLM）。返回原因：'sleep' / 'tired' / ''"""
+    """是否需要硬拦截（不调 LLM）。返回原因：'sleep' / ''
+
+    只有睡眠态会硬拦截；时间片（兴奋/平淡/疲倦）只影响能量结算与语气，
+    不丢弃任何消息。state 参数保留是为兼容调用方签名（当前不参与判定）。
+    """
     at = (when.timestamp() if when else time.time())
     sleep_cfg = cfg["sleep"]
     if st.sleep_until and at < st.sleep_until:
         if is_at or not sleep_cfg.get("block_non_at", True):
             return ""
         return "sleep"
-    if state == "tired" and cfg["decision"].get("tired_block_non_at", True) and not is_at:
-        return "tired"
     return ""
 
 
@@ -697,8 +704,10 @@ def prompt_context(cfg: dict[str, Any], st: EnergyState, state: str, *,
         f"你现在的状态：{level['tone']}。",
         f"表情包：这段时间你配图的概率约 {level['meme_prob'] * 100:.0f}%。",
     ]
+    if state == "tired":
+        lines.append("现在是深夜疲倦期，你很困：说话变蔫、句子更短，但别人 @ 你还是会回应。")
     hint = reply_hint(cfg, st.energy)
-    if not is_at and state != "tired":
+    if not is_at:
         lines.append(
             f"对于没有 @ 你的消息，你大概只有 {hint * 100:.0f}% 会接话——不想回就直接不回。")
     if woke_from_sleep:

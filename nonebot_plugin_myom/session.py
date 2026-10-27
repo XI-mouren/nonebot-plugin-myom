@@ -229,9 +229,10 @@ class Session:
             energy.enter_sleep(cfg, st, when=when)
 
     def energy_blocked(self, is_at: bool) -> str:
-        """轻量预判（不结算能量）：返回 'sleep' / 'tired' / ''
+        """轻量预判（不结算能量）：返回 'sleep' / ''
 
         供消息入口在图片识别之前调用，被拦截的消息连 VLM 都不会触发。
+        只有睡眠态会拦截；时间片（兴奋/平淡/疲倦）不影响拦截。
         """
         if not (self._energy_on and self._energy is not None and self._energy_cfg is not None):
             return ""
@@ -293,13 +294,10 @@ class Session:
         # 2) 上一轮把能量耗到阈值以下 → 现在入睡
         self._maybe_fall_asleep(when)
 
-        # 3) 硬拦截：休眠期非 @、疲倦期非 @
+        # 3) 硬拦截：只有休眠期非 @（疲倦期不做拦截，只影响语气与能量）
         reason = energy.should_block(cfg, st, state, is_at=is_at, when=when)
         if reason:
-            if reason == "sleep":
-                self._settle_sleep_recover(when)
-            else:
-                energy.settle_idle(cfg, st, state, is_at=False)
+            self._settle_sleep_recover(when)
             self._energy_persist()
             self._energy_turn = None
             self._allowed_memes = set()
@@ -367,7 +365,7 @@ class Session:
         if len(self.recent_messages) > 50:
             self.recent_messages = self.recent_messages[-50:]
 
-        # ---- 能量节律 gate：休眠期 / 疲倦期非 @ → 直接丢弃，不构建 prompt、不调 LLM ----
+        # ---- 能量节律 gate：仅休眠期非 @ → 直接丢弃，不构建 prompt、不调 LLM ----
         if self._energy_on and self._energy is not None and self._energy_cfg is not None:
             if not self._energy_gate(self._is_at(messages_chunk)):
                 return None
