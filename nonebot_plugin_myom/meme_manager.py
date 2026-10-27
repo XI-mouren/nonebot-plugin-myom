@@ -284,23 +284,74 @@ class MemeManager:
         """清空内存中的缓存索引（不删磁盘文件，供下次重建）"""
         self._cache_index.clear()
 
-    async def cleanup_cache(self, max_age_hours: int = 168):
-        """清理过期的缓存文件（默认 7 天）"""
+    async def cleanup_cache(self, max_age_hours: float = 168) -> tuple[int, int]:
+        """清理 sticker_cache 中超过 max_age_hours 的文件，返回 (删除数, 释放字节)。
+
+        候选描述只存在于内存索引 _cache_index，进程重启即失效；磁盘上的图片一旦
+        不在索引里，就永远不会再被模型看到，因此按时间回收是安全的。顺带把索引中
+        指向已消失文件的条目一并移除，避免收藏时踩到「缓存文件不存在」。
+
+        max_age_hours <= 0 视为不清理（配置填 0 不应把整个候选池删光）；需要立即
+        清空请用 clear_cache_dir()。
+        """
+        if max_age_hours <= 0:
+            return 0, 0
         now = time.time()
-        cleaned = 0
+        deleted = 0
+        freed = 0
         cache = _cache_dir()
         for f in cache.iterdir():
-            if f.is_file():
-                age_hours = (now - f.stat().st_mtime) / 3600
-                if age_hours > max_age_hours:
-                    f.unlink()
-                    cleaned += 1
-        to_remove = [cid for cid, info in self._cache_index.items()
-                     if not Path(info["path"]).exists()]
-        for cid in to_remove:
+            if not f.is_file():
+                continue
+            try:
+                if (now - f.stat().st_mtime) / 3600 <= max_age_hours:
+                    continue
+                size = f.stat().st_size
+                f.unlink()
+                deleted += 1
+                freed += size
+            except OSError as e:
+                logger.warning(f"[清理] 删除缓存文件失败 {f.name}: {e}")
+        for cid in [c for c, info in self._cache_index.items()
+                    if not Path(info["path"]).exists()]:
             del self._cache_index[cid]
-        if cleaned:
-            logger.info(f"[清理] 缓存清理: {cleaned} 个过期文件")
+        if deleted:
+            logger.info(f"[清理] sticker_cache: 删除 {deleted} 个过期文件，"
+                        f"释放 {freed / 1048576:.1f} MB")
+        return deleted, freed
+
+    async def clear_cache_dir(self) -> tuple[int, int]:
+        """清空 sticker_cache 全部文件并清空内存索引，返回 (删除数, 释放字节)。"""
+        deleted = 0
+        freed = 0
+        for f in _cache_dir().iterdir():
+            if not f.is_file():
+                continue
+            try:
+                size = f.stat().st_size
+                f.unlink()
+                deleted += 1
+                freed += size
+            except OSError as e:
+                logger.warning(f"[清理] 删除缓存文件失败 {f.name}: {e}")
+        self._cache_index.clear()
+        if deleted:
+            logger.info(f"[清理] sticker_cache: 已清空 {deleted} 个文件，"
+                        f"释放 {freed / 1048576:.1f} MB")
+        return deleted, freed
+
+    def cache_stats(self) -> tuple[int, int]:
+        """sticker_cache 当前文件数、占用字节数。"""
+        count = 0
+        total = 0
+        try:
+            for f in _cache_dir().iterdir():
+                if f.is_file():
+                    count += 1
+                    total += f.stat().st_size
+        except OSError:
+            pass
+        return count, total
 
     async def cleanup(self, max_count: int = 0):
         """表情包数量达到上限时触发清理：删除使用频率最低的一批条目（图片文件 + 描述索引），

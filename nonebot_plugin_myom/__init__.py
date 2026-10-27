@@ -82,7 +82,9 @@ _migrate_legacy_dirs()
 from .client import LLMClient, make_http_client
 from .config import Config, plugin_config
 from . import energy
-from .image_manager import IMAGE_CACHE_DIR, image_manager
+from .image_manager import (
+    IMAGE_CACHE_DIR, cleanup_image_cache, image_cache_stats, image_manager,
+)
 from .meme_manager import AtMessage, MemeMessage, TextMessage, meme_manager
 from .mem import Message as MMessage
 from .presets import PRESETS, load_presets
@@ -254,6 +256,7 @@ presets_cmd = on_command(rule=to_me() & is_group_message, permission=SUPERUSER, 
 set_preset_cmd = on_command(rule=to_me() & is_group_message, permission=SUPERUSER, cmd="set_preset", aliases={"set_presets"}, priority=0, block=True)
 reload_meme_cmd = on_command(rule=to_me() & is_group_message, permission=SUPERUSER, cmd="reload_meme", aliases={"重载表情包"}, priority=0, block=True)
 reload_energy_cmd = on_command(rule=to_me() & is_group_message, permission=SUPERUSER, cmd="reload_energy", aliases={"重载节律"}, priority=0, block=True)
+clear_cache_cmd = on_command(rule=to_me() & is_group_message, permission=SUPERUSER, cmd="clear_cache", aliases={"清理缓存"}, priority=0, block=True)
 auto_chat = on_message(rule=is_group_message, priority=1, block=False)
 
 
@@ -551,6 +554,88 @@ def _migrate_cache_dirs():
         except OSError:
             pass
         logger.success(f"[迁移] {name} 已迁移至数据目录（{moved} 个文件）")
+
+
+# ---- 图片缓存维护 ----
+# sticker_cache 是候选池：群消息里的每张图都会无条件写入，而候选描述只存在内存索引里，
+# 进程重启后这些文件就再也不会被模型看到。若不做定期回收，目录只会无限膨胀。
+
+def _fmt_size(num: float) -> str:
+    if num < 1024:
+        return f"{int(num)} B"
+    if num < 1024 ** 2:
+        return f"{num / 1024:.1f} KB"
+    if num < 1024 ** 3:
+        return f"{num / 1024 ** 2:.1f} MB"
+    return f"{num / 1024 ** 3:.2f} GB"
+
+
+def _cache_report() -> str:
+    """三处缓存的当前占用。"""
+    sc_count, sc_size = meme_manager.cache_stats()
+    img = image_cache_stats()
+    return "\n".join((
+        f"sticker_cache 候选池: {sc_count} 个 / {_fmt_size(sc_size)}",
+        f"原图缓存 raw: {img['raw'][0]} 个 / {_fmt_size(img['raw'][1])}",
+        f"VLM 描述缓存: {img['desc'][0]} 个 / {_fmt_size(img['desc'][1])}",
+    ))
+
+
+async def run_cache_cleanup(force_all: bool = False) -> str:
+    """清理图片缓存并返回报告。
+
+    默认按配置的保留天数删过期文件；force_all=True 时无视保留期，清空
+    sticker_cache 与原图缓存。表情包库 memes/ 与 VLM 描述缓存永远不受影响。
+    """
+    if not force_all and not plugin_config.aigf_cache_clean_enabled:
+        return "缓存自动清理已关闭（AIGF_CACHE_CLEAN_ENABLED=false），本次未执行"
+
+    if force_all:
+        sc_deleted, sc_freed = await meme_manager.clear_cache_dir()
+        img = await asyncio.to_thread(
+            cleanup_image_cache, 0, plugin_config.aigf_image_desc_keep_days, True)
+    else:
+        sc_deleted, sc_freed = await meme_manager.cleanup_cache(
+            plugin_config.aigf_sticker_cache_keep_days * 24)
+        img = await asyncio.to_thread(
+            cleanup_image_cache,
+            plugin_config.aigf_image_raw_keep_days,
+            plugin_config.aigf_image_desc_keep_days)
+
+    total_deleted = sc_deleted + img["raw"][0] + img["desc"][0]
+    total_freed = sc_freed + img["raw"][1] + img["desc"][1]
+    head = (f"缓存清理完成：删除 {total_deleted} 个文件，释放 {_fmt_size(total_freed)}"
+            if total_deleted else "没有需要清理的过期文件")
+    return f"{head}\n{_cache_report()}"
+
+
+@clear_cache_cmd.handle()
+async def _(args: Message = CommandArg()):
+    arg = args.extract_plain_text().strip().lower()
+    if arg in ("统计", "状态", "stats"):
+        await clear_cache_cmd.finish("当前缓存占用：\n" + _cache_report())
+    force = arg in ("全部", "清空", "all")
+    await clear_cache_cmd.finish(await run_cache_cleanup(force_all=force))
+
+
+try:
+    from nonebot import require as _require
+
+    _scheduler = _require("nonebot_plugin_apscheduler").scheduler
+except Exception as _e:  # noqa: BLE001
+    _scheduler = None
+    logger.warning(f"[缓存] 未安装 nonebot-plugin-apscheduler，缓存定时清理不可用：{_e}")
+
+
+if _scheduler is not None:
+
+    @_scheduler.scheduled_job("cron", hour=4, minute=5,
+                              id="aigf_cache_cleanup", misfire_grace_time=3600)
+    async def _cache_cleanup_job():
+        if not plugin_config.aigf_cache_clean_enabled:
+            return
+        report = await run_cache_cleanup()
+        logger.info(f"[缓存] 每日清理：{report.splitlines()[0]}")
 
 
 @get_driver().on_startup

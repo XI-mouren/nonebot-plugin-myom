@@ -39,6 +39,11 @@ class Config(BaseModel):
     aigf_meme_max_count: int = Field(500, validation_alias=AliasChoices("myom_meme_max_count", "aigf_meme_max_count"), description="自动收集的表情包最大数量（达到后触发清理，删除使用频率最低的 aigf_meme_reserve_count 个）")
     aigf_meme_candidates: int = Field(20, validation_alias=AliasChoices("myom_meme_candidates", "aigf_meme_candidates"), description="每次构建 prompt 时注入的表情包候选数量（按当前对话关键词预筛选，避免全量注入撑爆上下文）")
     aigf_meme_reserve_count: int = Field(50, validation_alias=AliasChoices("myom_meme_reserve_count", "aigf_meme_reserve_count"), description="达到上限时永久保留的空位数：清理使用频率最低的条目，使其回落到 max_count - reserve")
+    # 图片缓存清理（候选池只进不出会无限膨胀，需定期回收）
+    aigf_cache_clean_enabled: bool = Field(True, validation_alias=AliasChoices("myom_cache_clean_enabled", "aigf_cache_clean_enabled"), description="是否启用图片缓存每日自动清理（凌晨 4:05 执行；只删过期的候选池与原图缓存，不动表情包库和描述缓存）")
+    aigf_sticker_cache_keep_days: int = Field(7, validation_alias=AliasChoices("myom_sticker_cache_keep_days", "aigf_sticker_cache_keep_days"), description="sticker_cache 候选池保留天数：超期删除。候选描述只存在于内存，重启后这些文件已无任何引用，留着纯占空间")
+    aigf_image_raw_keep_days: int = Field(7, validation_alias=AliasChoices("myom_image_raw_keep_days", "aigf_image_raw_keep_days"), description="image_cache/raw 原图下载缓存保留天数（删了不影响功能，下次用到重新下载）")
+    aigf_image_desc_keep_days: int = Field(0, validation_alias=AliasChoices("myom_image_desc_keep_days", "aigf_image_desc_keep_days"), description="VLM 描述缓存（image_cache/*.json）保留天数；0=永久保留。这是唯一花过钱的缓存，删了同一张图再出现要重新调 VLM")
     aigf_default_preset: str = Field("default", validation_alias=AliasChoices("myom_default_preset", "aigf_default_preset"), description="默认预设名称")
     aigf_batch_count: int = Field(10, validation_alias=AliasChoices("myom_batch_count", "aigf_batch_count"), description="攒满多少条消息后触发 LLM 请求")
     aigf_batch_timeout: float = Field(30.0, validation_alias=AliasChoices("myom_batch_timeout", "aigf_batch_timeout"), description="距最后一条消息多少秒后触发 LLM 请求")

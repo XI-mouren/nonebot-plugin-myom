@@ -10,7 +10,7 @@
 
 > 基于 [Funny1Potato/nonebot-plugin-aigf](https://github.com/Funny1Potato/nonebot-plugin-aigf) 二次开发（上游：[shadow3aaa/nonebot-plugin-nyaturingtest](https://github.com/shadow3aaa/nonebot-plugin-nyaturingtest)），遵循 **AGPL-3.0** 协议开源。
 
-当前版本：**0.5.0**（包名 `nonebot-plugin-myom`，模块名 `nonebot_plugin_myom`）
+当前版本：**0.5.1**（包名 `nonebot-plugin-myom`，模块名 `nonebot_plugin_myom`）
 
 ---
 
@@ -48,7 +48,7 @@
 | **图片理解**   | VLM / LLM 双模式、GIF 抽帧        | VLM 输出上限（默认 150 tokens）；图片描述与消耗按群归属；缓存纳入数据目录                                                                |
 | **安全**       | 无                                | 密钥泄露检测、日志脱敏                                                                                                                   |
 | **时间**       | 无                                | 当前时间注入、时区配置化（UTC 服务器不再偏移 8 小时）                                                                                    |
-| **工程**       | 无                                | 数据 / 配置 / 缓存自动迁移、能量设计文档、20 项新配置项                                                                                  |
+| **工程**       | 无                                | 数据 / 配置 / 缓存自动迁移、能量设计文档、51 项配置项（含图片缓存清理）                                                                    |
 
 ## 功能特性
 
@@ -255,6 +255,19 @@ AIGF_CHAT_OPENAI_API_KEY=sk-xxxxxxxx
 | `AIGF_MEME_MAX_COUNT`     | `500`  | 自动收集上限（达到后触发清理）             |
 | `AIGF_MEME_RESERVE_COUNT` | `50`   | 清理后保留的空位数（回落到 max - reserve） |
 | `AIGF_MEME_CANDIDATES`    | `20`   | 每次 prompt 注入的候选数量（按对话预筛）   |
+
+### 图片缓存
+
+群消息里的每张图片都会先进入 `sticker_cache` 候选池（无论最终是否被收藏），候选描述只保存在内存中，进程重启后这些文件就不会再被用到。开启自动清理可避免目录无限膨胀。
+
+| 配置项                          | 默认值 | 说明                                                                         |
+| ------------------------------- | ------ | ---------------------------------------------------------------------------- |
+| `AIGF_CACHE_CLEAN_ENABLED`      | `True` | 是否启用每日 4:05 自动清理                                                   |
+| `AIGF_STICKER_CACHE_KEEP_DAYS`  | `7`    | 候选池保留天数（填 `0` 表示不清理；要立即清空请用 `清理缓存 全部` 指令）     |
+| `AIGF_IMAGE_RAW_KEEP_DAYS`      | `7`    | `image_cache/raw` 原图下载缓存保留天数                                       |
+| `AIGF_IMAGE_DESC_KEEP_DAYS`     | `0`    | VLM 描述缓存保留天数，`0` = 永久。**这是唯一花过钱的缓存，删了同图再出现要重新调 VLM** |
+
+> 清理只涉及候选池与原图缓存，`memes/` 表情包库和描述缓存永不受影响。
 
 ### 联网搜索
 
@@ -497,6 +510,7 @@ AIGF_CHAT_OPENAI_API_KEY=sk-xxxxxxxx
 | `set_preset <名称>`      | 群聊                              | 切换当前群预设                                                               |
 | `重载表情包`             | 群聊                              | 重新加载表情包库                                                             |
 | `重载节律`               | 群聊                              | 重新读取并校验 energy.json，应用到所有群会话（非法配置不会覆盖运行中的配置） |
+| `清理缓存 [全部/统计]`   | 群聊                              | 清理过期图片缓存；`全部` = 无视保留期清空候选池与原图缓存；`统计` = 只看占用 |
 
 > 写操作（设置角色/重置/切预设/重载）限定群聊执行，避免私聊误改多群行为。
 

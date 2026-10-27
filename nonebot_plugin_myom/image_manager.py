@@ -32,6 +32,71 @@ from .vlm import VLM
 IMAGE_CACHE_DIR = store.get_plugin_data_dir() / "image_cache"
 
 
+def _purge_dir(directory, keep_days: float, suffix: str = "",
+               force: bool = False) -> tuple[int, int]:
+    """删除目录中修改时间超过 keep_days 的文件，返回 (删除数, 释放字节)。
+
+    keep_days=0 且 force=False 表示不清理；force=True 时无视保留期全删。
+    """
+    import time
+
+    if not directory.is_dir() or (keep_days <= 0 and not force):
+        return 0, 0
+    deadline = time.time() - max(keep_days, 0) * 86400
+    deleted = 0
+    freed = 0
+    for f in directory.iterdir():
+        if not f.is_file() or (suffix and f.suffix != suffix):
+            continue
+        try:
+            stat = f.stat()
+            if stat.st_mtime > deadline:
+                continue
+            f.unlink()
+            deleted += 1
+            freed += stat.st_size
+        except OSError as e:
+            logger.warning(f"[清理] 删除缓存文件失败 {f.name}: {e}")
+    return deleted, freed
+
+
+def cleanup_image_cache(raw_keep_days: float = 7, desc_keep_days: float = 0,
+                        force_raw: bool = False) -> dict[str, tuple[int, int]]:
+    """清理 image_cache 下的过期文件。
+
+    - raw/：原图下载缓存，删了下次重新下载，无副作用（force_raw 时全清）
+    - *.json：VLM 描述缓存，是唯一花过钱的产物，desc_keep_days=0 表示永久保留
+    """
+    raw = _purge_dir(IMAGE_CACHE_DIR / "raw", raw_keep_days, force=force_raw)
+    desc = _purge_dir(IMAGE_CACHE_DIR, desc_keep_days, suffix=".json")
+    if raw[0]:
+        logger.info(f"[清理] image_cache/raw: 删除 {raw[0]} 个过期文件，"
+                    f"释放 {raw[1] / 1048576:.1f} MB")
+    if desc[0]:
+        logger.info(f"[清理] image_cache 描述缓存: 删除 {desc[0]} 个过期文件，"
+                    f"释放 {desc[1] / 1048576:.1f} MB")
+    return {"raw": raw, "desc": desc}
+
+
+def image_cache_stats() -> dict[str, tuple[int, int]]:
+    """image_cache 各部分的文件数与占用字节。"""
+    result: dict[str, tuple[int, int]] = {}
+    for label, directory in (("raw", IMAGE_CACHE_DIR / "raw"), ("desc", IMAGE_CACHE_DIR)):
+        count = 0
+        total = 0
+        if directory.is_dir():
+            for f in directory.iterdir():
+                if f.is_file() and (label != "desc" or f.suffix == ".json"):
+                    try:
+                        count += 1
+                        total += f.stat().st_size
+                    except OSError:
+                        pass
+        result[label] = (count, total)
+    return result
+
+
+
 @dataclass
 class ImageWithDescription:
     description: str
