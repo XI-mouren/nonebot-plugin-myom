@@ -21,6 +21,8 @@
 - 新增 `清理缓存` 管理指令：无参数清理过期文件、`全部` 无视保留期清空、
   `统计` 只看当前占用
 - 保留期填 `0` 视为不清理（防止配置误填导致候选池被清空）；需要立即释放空间请用指令
+- **修复 `AIGF_MEME_MAX_COUNT` 配成 `0` 时会把表情包库整个删光的问题**：现在 `0` / 负数
+  一律视为「不限制」，绝不会因为配置写错清空资产
 - 新增 4 项配置：`AIGF_CACHE_CLEAN_ENABLED` / `AIGF_STICKER_CACHE_KEEP_DAYS` /
   `AIGF_IMAGE_RAW_KEEP_DAYS` / `AIGF_IMAGE_DESC_KEEP_DAYS`
 

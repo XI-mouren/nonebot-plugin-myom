@@ -361,6 +361,9 @@ class MemeManager:
         仅清理自动收集库（collected_memes），管理员手动添加的表情包不受影响。"""
         if max_count <= 0:
             max_count = plugin_config.aigf_meme_max_count
+        if max_count <= 0:
+            # 上限配成 0 或负数视为「不限制」——绝不能因为配置写错就把整个库清空
+            return
         reserve = max(0, min(plugin_config.aigf_meme_reserve_count, max_count))
         target = max_count - reserve  # 清理后应保留的目标数量
         if len(self.collected_memes) < max_count:

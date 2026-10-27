@@ -252,7 +252,7 @@ AIGF_CHAT_OPENAI_API_KEY=sk-xxxxxxxx
 | 配置项                      | 默认值   | 说明                                       |
 | --------------------------- | -------- | ------------------------------------------ |
 | `AIGF_MEME_ENABLED`       | `True` | 是否启用                                   |
-| `AIGF_MEME_MAX_COUNT`     | `500`  | 自动收集上限（达到后触发清理）             |
+| `AIGF_MEME_MAX_COUNT`     | `500`  | 自动收集上限（达到后触发清理；填 `0` = 无上限） |
 | `AIGF_MEME_RESERVE_COUNT` | `50`   | 清理后保留的空位数（回落到 max - reserve） |
 | `AIGF_MEME_CANDIDATES`    | `20`   | 每次 prompt 注入的候选数量（按对话预筛）   |
 
