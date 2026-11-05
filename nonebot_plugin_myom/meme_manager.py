@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+import asyncio
 import hashlib
 import json
 import os
@@ -73,6 +74,10 @@ class MemeManager:
         self._recent: list[str] = []
         self._recent_max = 5
         self._cache_index: dict[str, dict] = {}
+        # collected.json 是全局共享索引，不同群的 resolve（使用统计）/
+        # auto_collect / save_from_cache / cleanup 会并发读改写，
+        # 用一把进程级锁把"改内存 + 写盘"串行化，防止旧快照后落盘盖掉新条目
+        self._index_lock = asyncio.Lock()
 
     @property
     def memes(self) -> dict[str, Meme]:
@@ -170,45 +175,48 @@ class MemeManager:
             for m in self.select_candidate_items(match_text, limit))
 
     async def resolve(self, meme_id: str) -> str | None:
-        meme = self.memes.get(meme_id)
-        if not meme or meme_id in self._recent:
-            return None
-        self._recent.append(meme_id)
-        if len(self._recent) > self._recent_max:
-            self._recent.pop(0)
-        # 记录使用频率（清理时按此判定"使用频率最低"）
-        meme.usage_count += 1
-        meme.last_used = time.time()
-        # 使用统计只回写自动收集库；管理员库可能被手动维护，不回写（内存中累计即可）
-        if meme_id in self.collected_memes:
-            try:
-                await self._save_collected()
-            except Exception as e:
-                logger.error(f"[resolve] 保存使用统计失败: {e}")
-        path = str(self._full_path(meme.path))
-        logger.debug(f"[resolve] {meme_id} -> {path}")
-        return path
+        async with self._index_lock:
+            meme = self.memes.get(meme_id)
+            if not meme or meme_id in self._recent:
+                return None
+            self._recent.append(meme_id)
+            if len(self._recent) > self._recent_max:
+                self._recent.pop(0)
+            # 记录使用频率（清理时按此判定"使用频率最低"）
+            meme.usage_count += 1
+            meme.last_used = time.time()
+            # 使用统计只回写自动收集库；管理员库可能被手动维护，不回写（内存中累计即可）
+            if meme_id in self.collected_memes:
+                try:
+                    await self._save_collected()
+                except Exception as e:
+                    logger.error(f"[resolve] 保存使用统计失败: {e}")
+            path = str(self._full_path(meme.path))
+            logger.debug(f"[resolve] {meme_id} -> {path}")
+            return path
 
     async def auto_collect(self, image_bytes: bytes, description: str) -> bool:
-        file_hash = hashlib.md5(image_bytes).hexdigest()[:12]
-        for meme in self.memes.values():
-            if file_hash in meme.path:
-                return False
-        filename = await self._save_image(image_bytes, file_hash)
-        meme_id = self._generate_id(description)
-        # id 源自描述文本：两张不同图片拿到相同/极近描述时会生成同一 id，
-        # 直接用会互相覆盖（后入库的顶掉先入库的）。撞车时退回图片内容 hash。
-        if meme_id in self.collected_memes:
-            logger.info(f"[自动收藏] meme_id 撞车（{meme_id}），改用内容 hash 作 id")
-            meme_id = file_hash
-        keywords = self._extract_keywords(description)
-        self.collected_memes[meme_id] = Meme(
-            id=meme_id, path=filename, keywords=keywords, description=description[:50],
-        )
-        await self._save_collected()
-        logger.debug(f"[自动收藏] 生成条目: {meme_id}")
-        await self.cleanup()
-        return True
+        # 读改写整体进索引锁：与 resolve / save_from_cache / cleanup 并发时不丢条目
+        async with self._index_lock:
+            file_hash = hashlib.md5(image_bytes).hexdigest()[:12]
+            for meme in self.memes.values():
+                if file_hash in meme.path:
+                    return False
+            filename = await self._save_image(image_bytes, file_hash)
+            meme_id = self._generate_id(description)
+            # id 源自描述文本：两张不同图片拿到相同/极近描述时会生成同一 id，
+            # 直接用会互相覆盖（后入库的顶掉先入库的）。撞车时退回图片内容 hash。
+            if meme_id in self.collected_memes:
+                logger.info(f"[自动收藏] meme_id 撞车（{meme_id}），改用内容 hash 作 id")
+                meme_id = file_hash
+            keywords = self._extract_keywords(description)
+            self.collected_memes[meme_id] = Meme(
+                id=meme_id, path=filename, keywords=keywords, description=description[:50],
+            )
+            await self._save_collected()
+            logger.debug(f"[自动收藏] 生成条目: {meme_id}")
+            await self._cleanup_locked()
+            return True
 
     async def _save_image(self, image_bytes: bytes, file_hash: str) -> str:
         """保存图片到 memes 目录，返回相对文件名"""
@@ -264,42 +272,43 @@ class MemeManager:
         ]
 
     async def save_from_cache(self, cache_id: str, description: str, keywords: list[str]) -> bool:
-        """从缓存中保存表情包到正式目录，使用 LLM 提供的描述和关键词"""
-        cache_info = self._cache_index.get(cache_id)
-        if not cache_info:
-            logger.warning(f"[缓存] 未找到 cache_id={cache_id}")
-            return False
-        cache_path = Path(cache_info["path"])
-        if not cache_path.exists():
-            logger.warning(f"[缓存] 缓存文件不存在: {cache_path}")
-            return False
-        # 描述以入库时的原始描述为准（VLM 看图所得），LLM 复述的只作备胎——
-        # 模型从候选列表抄写时可能张冠李戴，这正是"图文不符"的主要来源。
-        # llm 图片模式下缓存描述为空串（描述由多模态主模型现看现写），此时才用 LLM 的。
-        cached_desc = (cache_info.get("description") or "").strip()
-        if cached_desc and description.strip() and cached_desc != description.strip():
-            logger.info(f"[收藏] 忽略 LLM 描述（与入库描述不符），采用入库原文: {cached_desc[:30]}")
-        final_desc = cached_desc or description
-        async with await anyio.open_file(cache_path, "rb") as f:
-            image_bytes = await f.read()
-        file_hash = hashlib.md5(image_bytes).hexdigest()[:12]
-        for meme in self.memes.values():
-            if file_hash in meme.path:
+        """从缓存中保存表情包到正式目录（读改写整体进索引锁）"""
+        async with self._index_lock:
+            cache_info = self._cache_index.get(cache_id)
+            if not cache_info:
+                logger.warning(f"[缓存] 未找到 cache_id={cache_id}")
                 return False
-        ext = cache_path.suffix
-        filename = f"{file_hash}{ext}"
-        dest = _meme_dir() / filename
-        async with await anyio.open_file(dest, "wb") as f:
-            await f.write(image_bytes)
-        # cache_id 本身就是 hash，直接用作 meme id
-        self.collected_memes[cache_id] = Meme(
-            id=cache_id, path=filename, keywords=keywords, description=final_desc,
-        )
-        await self._save_collected()
-        logger.success(f"[表情包收藏] 已保存到表情包库: {cache_id} - {final_desc[:30]}")
-        # 收藏后检查是否触及上限，需要时清理使用频率最低的条目以腾出空位
-        await self.cleanup()
-        return True
+            cache_path = Path(cache_info["path"])
+            if not cache_path.exists():
+                logger.warning(f"[缓存] 缓存文件不存在: {cache_path}")
+                return False
+            # 描述以入库时的原始描述为准（VLM 看图所得），LLM 复述的只作备胎——
+            # 模型从候选列表抄写时可能张冠李戴，这正是"图文不符"的主要来源。
+            # llm 图片模式下缓存描述为空串（描述由多模态主模型现看现写），此时才用 LLM 的。
+            cached_desc = (cache_info.get("description") or "").strip()
+            if cached_desc and description.strip() and cached_desc != description.strip():
+                logger.info(f"[收藏] 忽略 LLM 描述（与入库描述不符），采用入库原文: {cached_desc[:30]}")
+            final_desc = cached_desc or description
+            async with await anyio.open_file(cache_path, "rb") as f:
+                image_bytes = await f.read()
+            file_hash = hashlib.md5(image_bytes).hexdigest()[:12]
+            for meme in self.memes.values():
+                if file_hash in meme.path:
+                    return False
+            ext = cache_path.suffix
+            filename = f"{file_hash}{ext}"
+            dest = _meme_dir() / filename
+            async with await anyio.open_file(dest, "wb") as f:
+                await f.write(image_bytes)
+            # cache_id 本身就是 hash，直接用作 meme id
+            self.collected_memes[cache_id] = Meme(
+                id=cache_id, path=filename, keywords=keywords, description=final_desc,
+            )
+            await self._save_collected()
+            logger.success(f"[表情包收藏] 已保存到表情包库: {cache_id} - {final_desc[:30]}")
+            # 收藏后检查是否触及上限，需要时清理使用频率最低的条目以腾出空位
+            await self._cleanup_locked()
+            return True
 
     def clear_cache(self):
         """清空内存中的缓存索引（不删磁盘文件，供下次重建）"""
@@ -375,7 +384,14 @@ class MemeManager:
         return count, total
 
     async def cleanup(self, max_count: int = 0):
-        """表情包数量达到上限时触发清理：删除使用频率最低的一批条目（图片文件 + 描述索引），
+        """表情包数量达到上限时触发清理（对外入口，自动加索引锁）"""
+        async with self._index_lock:
+            await self._cleanup_locked(max_count)
+
+    async def _cleanup_locked(self, max_count: int = 0):
+        """清理逻辑本体，调用方必须已持有 _index_lock（auto_collect /
+        save_from_cache 在锁内调用本方法，cleanup 对外包一层锁）。
+        删除使用频率最低的一批条目（图片文件 + 描述索引），
         使数量回落到 max_count - reserve，从而永远空出 reserve 个位置接收新表情包。
         判定依据：usage_count（发送次数）最低者优先；次数相同时，最久未使用的优先
         （从未被发送过的，用图片文件的修改时间兜底，越早收藏的越先被清理）。

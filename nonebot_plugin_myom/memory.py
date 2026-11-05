@@ -20,6 +20,7 @@ import json
 import math
 import os
 import time
+from uuid import uuid4
 from datetime import datetime
 
 import anyio
@@ -47,16 +48,22 @@ def _friend_lock(user_id: str) -> asyncio.Lock:
 
 
 async def atomic_write_json(path, obj) -> None:
-    """原子写 JSON：先写同目录 .tmp，再 os.replace 整体替换。
+    """原子写 JSON：先写同目录唯一 .tmp，再 os.replace 整体替换。
 
     rename 在同一文件系统内是原子操作，读者要么看到旧文件、要么看到
     完整新文件，永远读不到写了一半的内容（并发交错 / 进程中断均安全）。
-    tmp 必须与目标同目录，保证二者在同一文件系统上。
+    tmp 必须与目标同目录，保证二者在同一文件系统上；tmp 名带随机后缀，
+    两个协程并发写同一路径时不会互踩同一个临时文件（调用方可能没加锁，
+    如 collected.json 会被不同群的 resolve / auto_collect 并发写）。
     """
-    tmp = path.with_name(path.name + ".tmp")
-    async with await anyio.open_file(tmp, "w", encoding="utf-8") as f:
-        await f.write(json.dumps(obj, ensure_ascii=False, indent=2))
-    os.replace(tmp, path)
+    tmp = path.with_name(f"{path.name}.{uuid4().hex[:8]}.tmp")
+    try:
+        async with await anyio.open_file(tmp, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(obj, ensure_ascii=False, indent=2))
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)   # 失败时清掉残留 tmp，不留垃圾
+        raise
 
 
 # ============================ 熟悉度（好感度）与遗忘 ============================ #
