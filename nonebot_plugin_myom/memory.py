@@ -14,9 +14,11 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+import asyncio
 import hashlib
 import json
 import math
+import os
 import time
 from datetime import datetime
 
@@ -29,6 +31,32 @@ from .config import plugin_config
 from .time_context import _now as _local_now
 
 FRIENDS_DIR = store.get_plugin_data_dir() / "memory" / "friends"
+
+
+# --------------------------- 并发写保护 --------------------------- #
+
+# 同一 user_id 一把锁：活动统计与资料更新可能并发改同一份档案
+_friend_locks: dict[str, asyncio.Lock] = {}
+
+
+def _friend_lock(user_id: str) -> asyncio.Lock:
+    lock = _friend_locks.get(user_id)
+    if lock is None:
+        lock = _friend_locks[user_id] = asyncio.Lock()
+    return lock
+
+
+async def atomic_write_json(path, obj) -> None:
+    """原子写 JSON：先写同目录 .tmp，再 os.replace 整体替换。
+
+    rename 在同一文件系统内是原子操作，读者要么看到旧文件、要么看到
+    完整新文件，永远读不到写了一半的内容（并发交错 / 进程中断均安全）。
+    tmp 必须与目标同目录，保证二者在同一文件系统上。
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    async with await anyio.open_file(tmp, "w", encoding="utf-8") as f:
+        await f.write(json.dumps(obj, ensure_ascii=False, indent=2))
+    os.replace(tmp, path)
 
 
 # ============================ 熟悉度（好感度）与遗忘 ============================ #
@@ -126,7 +154,9 @@ async def decay_all_friends(force_days: int | None = None) -> tuple[int, int, in
 
         data["familiarity"] = round(score, 6)
         data["decay_date"] = today.isoformat()
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
         keep += 1
 
     return scanned, keep, forget
@@ -155,8 +185,7 @@ class MemoryManager:
 
     async def save_short_term(self, items: list[str]):
         path = self.data_dir / "short_term.json"
-        async with await anyio.open_file(path, "w", encoding="utf-8") as f:
-            await f.write(json.dumps({"items": items}, ensure_ascii=False, indent=2))
+        await atomic_write_json(path, {"items": items})
 
     async def load_long_term(self) -> list[str]:
         path = self.data_dir / "long_term.json"
@@ -171,8 +200,7 @@ class MemoryManager:
 
     async def save_long_term(self, facts: list[str]):
         path = self.data_dir / "long_term.json"
-        async with await anyio.open_file(path, "w", encoding="utf-8") as f:
-            await f.write(json.dumps({"facts": facts}, ensure_ascii=False, indent=2))
+        await atomic_write_json(path, {"facts": facts})
 
     async def load_friend(self, user_id: str) -> dict | None:
         path = self.friends_dir / f"{user_id}.json"
@@ -187,8 +215,7 @@ class MemoryManager:
 
     async def save_friend(self, user_id: str, data: dict):
         path = self.friends_dir / f"{user_id}.json"
-        async with await anyio.open_file(path, "w", encoding="utf-8") as f:
-            await f.write(json.dumps(data, ensure_ascii=False, indent=2))
+        await atomic_write_json(path, data)
 
     async def load_friends_batch(self, users: list[dict[str, str]]) -> dict[str, dict]:
         """批量加载当前群的群友信息"""
@@ -254,114 +281,118 @@ class MemoryManager:
         for key, ops in friends_ops.items():
             # 如果 key 不是纯数字（QQ号），尝试从反查表中找到对应的 QQ 号
             user_id = key if key.isdigit() else nickname_to_id.get(key, key)
-            friend = await self.load_friend(user_id) or {
-                "id": user_id,
-                "nickname": key if not key.isdigit() else "",
-                "aliases": [],
-                "past_nicknames": [],
-                "info": [],
-                "groups": [],
-                "follow_ups": [],
-                "taboos": [],
-                "message_count": 0,
-                "first_seen": time.time(),
-                "last_active": 0.0,
-                "hours": {},
-            }
-            # 确保当前群在 groups 列表中
-            if self.group_id not in friend.get("groups", []):
-                friend.setdefault("groups", []).append(self.group_id)
-            # 处理 info 的增删改
-            info = friend.get("info", [])
-            for idx in sorted([int(i) for i in ops.get("delete", [])], reverse=True):
-                if 0 <= idx < len(info):
-                    info.pop(idx)
-            for mod in ops.get("modify", []):
-                idx, content = int(mod.get("index", -1)), mod.get("content", "")
-                if 0 <= idx < len(info) and content:
-                    info[idx] = content
-            for item in ops.get("add", []):
-                if item and item not in info:
-                    info.append(item)
-            friend["info"] = info
-            # 处理 aliases 的增删
-            aliases = friend.get("aliases", [])
-            for item in ops.get("add_alias", []):
-                if item and item not in aliases:
-                    aliases.append(item)
-            for item in ops.get("remove_alias", []):
-                if item in aliases:
-                    aliases.remove(item)
-            friend["aliases"] = aliases
-            # 待跟进话题（按内容匹配移除，降低模型给错下标的概率）
-            follow_ups = friend.get("follow_ups", [])
-            for item in ops.get("add_follow_up", []):
-                if item and item not in follow_ups:
-                    follow_ups.append(item)
-            for item in ops.get("remove_follow_up", []):
-                if item in follow_ups:
-                    follow_ups.remove(item)
-            friend["follow_ups"] = follow_ups
-            # 雷点（按内容匹配移除）
-            taboos = friend.get("taboos", [])
-            for item in ops.get("add_taboo", []):
-                if item and item not in taboos:
-                    taboos.append(item)
-            for item in ops.get("remove_taboo", []):
-                if item in taboos:
-                    taboos.remove(item)
-            friend["taboos"] = taboos
-            # 更新昵称
-            if ops.get("update_name"):
-                friend["nickname"] = ops["update_name"]
-            await self.save_friend(user_id, friend)
-            logger.debug(f"[记忆] 群友信息已保存: {user_id}")
+            # 读改写整体进锁：与 record_member_activity 并发改同一人时不再交错/互相覆盖
+            async with _friend_lock(user_id):
+                friend = await self.load_friend(user_id) or {
+                    "id": user_id,
+                    "nickname": key if not key.isdigit() else "",
+                    "aliases": [],
+                    "past_nicknames": [],
+                    "info": [],
+                    "groups": [],
+                    "follow_ups": [],
+                    "taboos": [],
+                    "message_count": 0,
+                    "first_seen": time.time(),
+                    "last_active": 0.0,
+                    "hours": {},
+                }
+                # 确保当前群在 groups 列表中
+                if self.group_id not in friend.get("groups", []):
+                    friend.setdefault("groups", []).append(self.group_id)
+                # 处理 info 的增删改
+                info = friend.get("info", [])
+                for idx in sorted([int(i) for i in ops.get("delete", [])], reverse=True):
+                    if 0 <= idx < len(info):
+                        info.pop(idx)
+                for mod in ops.get("modify", []):
+                    idx, content = int(mod.get("index", -1)), mod.get("content", "")
+                    if 0 <= idx < len(info) and content:
+                        info[idx] = content
+                for item in ops.get("add", []):
+                    if item and item not in info:
+                        info.append(item)
+                friend["info"] = info
+                # 处理 aliases 的增删
+                aliases = friend.get("aliases", [])
+                for item in ops.get("add_alias", []):
+                    if item and item not in aliases:
+                        aliases.append(item)
+                for item in ops.get("remove_alias", []):
+                    if item in aliases:
+                        aliases.remove(item)
+                friend["aliases"] = aliases
+                # 待跟进话题（按内容匹配移除，降低模型给错下标的概率）
+                follow_ups = friend.get("follow_ups", [])
+                for item in ops.get("add_follow_up", []):
+                    if item and item not in follow_ups:
+                        follow_ups.append(item)
+                for item in ops.get("remove_follow_up", []):
+                    if item in follow_ups:
+                        follow_ups.remove(item)
+                friend["follow_ups"] = follow_ups
+                # 雷点（按内容匹配移除）
+                taboos = friend.get("taboos", [])
+                for item in ops.get("add_taboo", []):
+                    if item and item not in taboos:
+                        taboos.append(item)
+                for item in ops.get("remove_taboo", []):
+                    if item in taboos:
+                        taboos.remove(item)
+                friend["taboos"] = taboos
+                # 更新昵称
+                if ops.get("update_name"):
+                    friend["nickname"] = ops["update_name"]
+                await self.save_friend(user_id, friend)
+                logger.debug(f"[记忆] 群友信息已保存: {user_id}")
 
     async def record_member_activity(self, user_id: str, qq_nickname: str):
         """每次收到群友消息时调用：同步昵称（变更记入 past_nicknames）
         + 累计活跃统计（message_count / last_active / hours 活跃时段直方图）"""
         if not user_id:
             return
-        friend = await self.load_friend(user_id)
-        if friend is None:
-            friend = {
-                "id": user_id,
-                "nickname": qq_nickname,
-                "aliases": [],
-                "past_nicknames": [],
-                "info": [],
-                "groups": [self.group_id],
-                "follow_ups": [],
-                "taboos": [],
-                "message_count": 0,
-                "first_seen": time.time(),
-                "last_active": 0.0,
-                "hours": {},
-            }
-        if qq_nickname:
-            old_nick = friend.get("nickname", "")
-            if old_nick and old_nick != qq_nickname:
-                past = friend.get("past_nicknames", [])
-                if old_nick not in past:
-                    past.append(old_nick)
-                friend["past_nicknames"] = past
-            friend["nickname"] = qq_nickname
-        if self.group_id not in friend.get("groups", []):
-            friend.setdefault("groups", []).append(self.group_id)
-        # 活跃统计（代码维护，不经模型）
-        friend["message_count"] = friend.get("message_count", 0) + 1
-        friend.setdefault("first_seen", time.time())
-        friend["last_active"] = time.time()
-        hours = friend.setdefault("hours", {})
-        # 活跃时段必须用配置时区（AIGF_TIMEZONE_OFFSET）；用 datetime.now() 在 UTC
-        # 服务器上会整体偏移 8 小时，导致 prompt 里的"活跃时段"完全错位
-        hour = str(_local_now().hour)
-        hours[hour] = hours.get(hour, 0) + 1
-        # 说过话 = 重新记住他：熟悉度刷新为发言量对应的真实值，衰减记账日归零
-        friend["familiarity"] = round(
-            base_familiarity(friend["message_count"], friend.get("last_active", 0.0)), 6)
-        friend["decay_date"] = _today().isoformat()
-        await self.save_friend(user_id, friend)
+        # 读改写整体进锁：与 update_friend_info 并发改同一人时不再交错/互相覆盖
+        async with _friend_lock(user_id):
+            friend = await self.load_friend(user_id)
+            if friend is None:
+                friend = {
+                    "id": user_id,
+                    "nickname": qq_nickname,
+                    "aliases": [],
+                    "past_nicknames": [],
+                    "info": [],
+                    "groups": [self.group_id],
+                    "follow_ups": [],
+                    "taboos": [],
+                    "message_count": 0,
+                    "first_seen": time.time(),
+                    "last_active": 0.0,
+                    "hours": {},
+                }
+            if qq_nickname:
+                old_nick = friend.get("nickname", "")
+                if old_nick and old_nick != qq_nickname:
+                    past = friend.get("past_nicknames", [])
+                    if old_nick not in past:
+                        past.append(old_nick)
+                    friend["past_nicknames"] = past
+                friend["nickname"] = qq_nickname
+            if self.group_id not in friend.get("groups", []):
+                friend.setdefault("groups", []).append(self.group_id)
+            # 活跃统计（代码维护，不经模型）
+            friend["message_count"] = friend.get("message_count", 0) + 1
+            friend.setdefault("first_seen", time.time())
+            friend["last_active"] = time.time()
+            hours = friend.setdefault("hours", {})
+            # 活跃时段必须用配置时区（AIGF_TIMEZONE_OFFSET）；用 datetime.now() 在 UTC
+            # 服务器上会整体偏移 8 小时，导致 prompt 里的"活跃时段"完全错位
+            hour = str(_local_now().hour)
+            hours[hour] = hours.get(hour, 0) + 1
+            # 说过话 = 重新记住他：熟悉度刷新为发言量对应的真实值，衰减记账日归零
+            friend["familiarity"] = round(
+                base_familiarity(friend["message_count"], friend.get("last_active", 0.0)), 6)
+            friend["decay_date"] = _today().isoformat()
+            await self.save_friend(user_id, friend)
 
     @staticmethod
     def compute_familiarity(friend: dict) -> float:

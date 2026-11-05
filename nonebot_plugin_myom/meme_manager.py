@@ -16,6 +16,7 @@
 
 import hashlib
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from nonebot import logger
 import nonebot_plugin_localstore as store
 from PIL import Image
 from .config import plugin_config
+from .memory import atomic_write_json
 
 
 @dataclass
@@ -91,21 +93,29 @@ class MemeManager:
         try:
             async with await anyio.open_file(path, encoding="utf-8") as f:
                 data = json.loads(await f.read())
-            result = {}
-            for item in data:
-                full_path = _meme_dir() / item["path"]
-                if full_path.exists():
-                    result[item["id"]] = Meme(
-                        id=item["id"], path=item["path"],
-                        keywords=item.get("keywords", []),
-                        description=item.get("description", ""),
-                        usage_count=item.get("usage_count", 0),
-                        last_used=item.get("last_used", 0.0),
-                    )
-            return result
         except Exception as e:
-            logger.error(f"加载 {path.name} 失败: {e}")
+            # 索引损坏（如历史版本非原子写留下的 Extra data）：整库返回空并备份坏文件，
+            # 避免每次启动都报错；图片文件保留，同图再次出现会重新入库
+            backup = path.with_name(path.name + ".corrupt")
+            try:
+                os.replace(path, backup)
+                logger.error(f"加载 {path.name} 失败: {e}；坏文件已备份为 {backup.name}，"
+                             f"表情包库将重新积累")
+            except OSError:
+                logger.error(f"加载 {path.name} 失败: {e}")
             return {}
+        result = {}
+        for item in data:
+            full_path = _meme_dir() / item["path"]
+            if full_path.exists():
+                result[item["id"]] = Meme(
+                    id=item["id"], path=item["path"],
+                    keywords=item.get("keywords", []),
+                    description=item.get("description", ""),
+                    usage_count=item.get("usage_count", 0),
+                    last_used=item.get("last_used", 0.0),
+                )
+        return result
 
     async def _save_index(self, memes: dict[str, Meme], path: Path):
         data = [
@@ -113,8 +123,7 @@ class MemeManager:
              "usage_count": m.usage_count, "last_used": m.last_used}
             for m in memes.values()
         ]
-        async with await anyio.open_file(path, "w", encoding="utf-8") as f:
-            await f.write(json.dumps(data, ensure_ascii=False, indent=2))
+        await atomic_write_json(path, data)
 
     async def _save_collected(self):
         await self._save_index(self.collected_memes, _meme_dir() / "collected.json")
@@ -187,6 +196,11 @@ class MemeManager:
                 return False
         filename = await self._save_image(image_bytes, file_hash)
         meme_id = self._generate_id(description)
+        # id 源自描述文本：两张不同图片拿到相同/极近描述时会生成同一 id，
+        # 直接用会互相覆盖（后入库的顶掉先入库的）。撞车时退回图片内容 hash。
+        if meme_id in self.collected_memes:
+            logger.info(f"[自动收藏] meme_id 撞车（{meme_id}），改用内容 hash 作 id")
+            meme_id = file_hash
         keywords = self._extract_keywords(description)
         self.collected_memes[meme_id] = Meme(
             id=meme_id, path=filename, keywords=keywords, description=description[:50],
@@ -259,6 +273,13 @@ class MemeManager:
         if not cache_path.exists():
             logger.warning(f"[缓存] 缓存文件不存在: {cache_path}")
             return False
+        # 描述以入库时的原始描述为准（VLM 看图所得），LLM 复述的只作备胎——
+        # 模型从候选列表抄写时可能张冠李戴，这正是"图文不符"的主要来源。
+        # llm 图片模式下缓存描述为空串（描述由多模态主模型现看现写），此时才用 LLM 的。
+        cached_desc = (cache_info.get("description") or "").strip()
+        if cached_desc and description.strip() and cached_desc != description.strip():
+            logger.info(f"[收藏] 忽略 LLM 描述（与入库描述不符），采用入库原文: {cached_desc[:30]}")
+        final_desc = cached_desc or description
         async with await anyio.open_file(cache_path, "rb") as f:
             image_bytes = await f.read()
         file_hash = hashlib.md5(image_bytes).hexdigest()[:12]
@@ -272,10 +293,10 @@ class MemeManager:
             await f.write(image_bytes)
         # cache_id 本身就是 hash，直接用作 meme id
         self.collected_memes[cache_id] = Meme(
-            id=cache_id, path=filename, keywords=keywords, description=description,
+            id=cache_id, path=filename, keywords=keywords, description=final_desc,
         )
         await self._save_collected()
-        logger.success(f"[表情包收藏] 已保存到表情包库: {cache_id} - {description[:30]}")
+        logger.success(f"[表情包收藏] 已保存到表情包库: {cache_id} - {final_desc[:30]}")
         # 收藏后检查是否触及上限，需要时清理使用频率最低的条目以腾出空位
         await self.cleanup()
         return True
